@@ -399,13 +399,218 @@ def marcar_enviada(promo: dict, hash_promo: str):
 #  FLUXO PRINCIPAL
 # ══════════════════════════════════════════════════════════════════════════════
 
+def scrape_aliexpress() -> list:
+    """Busca ofertas do AliExpress Brasil."""
+    promos = []
+    try:
+        print("[ALIEXPRESS] Buscando ofertas...")
+        url = "https://pt.aliexpress.com/deals.html"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        items = soup.select(".manhattan--container--1lP57Ag, .product-card, [class*='product']")[:10]
+        for item in items:
+            titulo = item.select_one("[class*='title'], h3, h2")
+            preco  = item.select_one("[class*='price'], .price")
+            link   = item.select_one("a")
+            if not titulo or not link:
+                continue
+            href = link.get("href", "")
+            if href.startswith("//"):
+                href = "https:" + href
+            elif not href.startswith("http"):
+                href = "https://pt.aliexpress.com" + href
+            preco_val = None
+            if preco:
+                nums = re.findall(r"[\d.,]+", preco.text)
+                if nums:
+                    try:
+                        preco_val = float(nums[0].replace(".", "").replace(",", "."))
+                    except:
+                        pass
+            promos.append({
+                "fonte":  "AliExpress",
+                "titulo": titulo.text.strip()[:80],
+                "preco":  preco_val,
+                "cupom":  "",
+                "url":    href,
+                "loja":   "AliExpress",
+                "temp":   90,
+            })
+        print(f"[ALIEXPRESS] ✓ {len(promos)} ofertas encontradas")
+    except Exception as e:
+        print(f"[ALIEXPRESS] Erro: {e}")
+    return promos
+
+
+def scrape_shopee() -> list:
+    """Busca ofertas da Shopee Brasil via API pública."""
+    promos = []
+    try:
+        print("[SHOPEE] Buscando ofertas...")
+        url = "https://shopee.com.br/api/v4/flash_sale/get_all_sessions"
+        resp = requests.get(url, headers={**HEADERS, "referer": "https://shopee.com.br"}, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            sessions = data.get("data", {}).get("sessions", [])
+            for session in sessions[:2]:
+                items = session.get("items", [])[:5]
+                for item in items:
+                    nome = item.get("name", "")
+                    preco = item.get("price", 0) / 100000  # Shopee usa centavos x1000
+                    preco_orig = item.get("price_before_discount", 0) / 100000
+                    itemid = item.get("itemid", "")
+                    shopid = item.get("shopid", "")
+                    href = f"https://shopee.com.br/product/{shopid}/{itemid}"
+                    desconto = None
+                    if preco_orig > preco:
+                        desconto = round((1 - preco / preco_orig) * 100)
+                    promos.append({
+                        "fonte":    "Shopee",
+                        "titulo":   nome[:80],
+                        "preco":    round(preco, 2),
+                        "preco_de": round(preco_orig, 2) if preco_orig else None,
+                        "desconto": desconto,
+                        "cupom":    "",
+                        "url":      href,
+                        "loja":     "Shopee",
+                        "temp":     95,
+                    })
+        print(f"[SHOPEE] ✓ {len(promos)} ofertas encontradas")
+    except Exception as e:
+        print(f"[SHOPEE] Erro: {e}")
+    return promos
+
+
+def scrape_magalu() -> list:
+    """Busca ofertas do Magazine Luiza."""
+    promos = []
+    try:
+        print("[MAGALU] Buscando ofertas...")
+        url = "https://www.magazineluiza.com.br/oferta-do-dia/"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        items = soup.select("[data-testid='product-card'], .productCard, .sc-fqkvVR")[:10]
+        for item in items:
+            titulo = item.select_one("[data-testid='product-title'], h2, h3")
+            preco  = item.select_one("[data-testid='price-value'], .sc-kpDqfm, [class*='price']")
+            link   = item.select_one("a")
+            if not titulo or not link:
+                continue
+            href = link.get("href", "")
+            if not href.startswith("http"):
+                href = "https://www.magazineluiza.com.br" + href
+            preco_val = None
+            if preco:
+                nums = re.findall(r"[\d.,]+", preco.text)
+                if nums:
+                    try:
+                        preco_val = float(nums[0].replace(".", "").replace(",", "."))
+                    except:
+                        pass
+            promos.append({
+                "fonte":  "Magazine Luiza",
+                "titulo": titulo.text.strip()[:80],
+                "preco":  preco_val,
+                "cupom":  "",
+                "url":    href,
+                "loja":   "Magalu",
+                "temp":   85,
+            })
+        print(f"[MAGALU] ✓ {len(promos)} ofertas encontradas")
+    except Exception as e:
+        print(f"[MAGALU] Erro: {e}")
+    return promos
+
+
+def scrape_casas_bahia() -> list:
+    """Busca ofertas das Casas Bahia."""
+    promos = []
+    try:
+        print("[CASAS BAHIA] Buscando ofertas...")
+        url = "https://www.casasbahia.com.br/ofertas-do-dia"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        items = soup.select(".product-card, [class*='ProductCard'], [class*='product-item']")[:10]
+        for item in items:
+            titulo = item.select_one("h2, h3, [class*='title'], [class*='name']")
+            preco  = item.select_one("[class*='price'], [class*='Price']")
+            link   = item.select_one("a")
+            if not titulo or not link:
+                continue
+            href = link.get("href", "")
+            if not href.startswith("http"):
+                href = "https://www.casasbahia.com.br" + href
+            preco_val = None
+            if preco:
+                nums = re.findall(r"[\d.,]+", preco.text)
+                if nums:
+                    try:
+                        preco_val = float(nums[0].replace(".", "").replace(",", "."))
+                    except:
+                        pass
+            promos.append({
+                "fonte":  "Casas Bahia",
+                "titulo": titulo.text.strip()[:80],
+                "preco":  preco_val,
+                "cupom":  "",
+                "url":    href,
+                "loja":   "Casas Bahia",
+                "temp":   80,
+            })
+        print(f"[CASAS BAHIA] ✓ {len(promos)} ofertas encontradas")
+    except Exception as e:
+        print(f"[CASAS BAHIA] Erro: {e}")
+    return promos
+
+
+def scrape_kabum() -> list:
+    """Busca ofertas da KaBuM via API pública."""
+    promos = []
+    try:
+        print("[KABUM] Buscando ofertas...")
+        url = "https://servicespub.prod.api.aws.grupokabum.com.br/catalog/v2/products-by-category/oferta-do-dia?page_number=1&page_size=10&is_off=true"
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        if resp.status_code == 200:
+            data = resp.json()
+            items = data.get("data", [])[:10]
+            for item in items:
+                nome     = item.get("name", "")
+                preco    = item.get("vlr_final", item.get("price", 0))
+                preco_de = item.get("vlr_normal", None)
+                slug     = item.get("path", "")
+                href     = f"https://www.kabum.com.br/produto/{slug}" if slug else ""
+                desconto = None
+                if preco_de and preco_de > preco:
+                    desconto = round((1 - preco / preco_de) * 100)
+                promos.append({
+                    "fonte":    "KaBuM",
+                    "titulo":   nome[:80],
+                    "preco":    round(float(preco), 2),
+                    "preco_de": round(float(preco_de), 2) if preco_de else None,
+                    "desconto": desconto,
+                    "cupom":    "",
+                    "url":      href,
+                    "loja":     "KaBuM",
+                    "temp":     88,
+                })
+        print(f"[KABUM] ✓ {len(promos)} ofertas encontradas")
+    except Exception as e:
+        print(f"[KABUM] Erro: {e}")
+    return promos
+
+
 def buscar_todas_promos() -> list:
     """Roda todos os scrapers e junta as promoções."""
     todas = []
     todas += scrape_pelando()
-    todas += scrape_promocao_ofertas()
+    todas += scrape_shopee()
+    todas += scrape_kabum()
     todas += scrape_amazon_ofertas()
     todas += scrape_mercadolivre_ofertas()
+    todas += scrape_aliexpress()
+    todas += scrape_magalu()
+    todas += scrape_casas_bahia()
+    todas += scrape_promocao_ofertas()
     # Ordena pelas mais quentes
     todas.sort(key=lambda x: x.get("temp", 0), reverse=True)
     return todas
