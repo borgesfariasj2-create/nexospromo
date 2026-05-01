@@ -1,10 +1,9 @@
 """
 ================================================================================
-  NEXOS PROMO BOT v8
-  Fontes confirmadas que funcionam no Railway:
-  - Mercado Livre API (corrigida)
-  - KaBuM API (headers corretos)
-  - Promobit API (nova fonte, funciona)
+  NEXOS PROMO BOT v9
+  - Shopee API Oficial de Afiliados (GraphQL)
+  - KaBuM API
+  - Mercado Livre API
   - Email (Pichau, Terabyte, etc)
 ================================================================================
 """
@@ -16,6 +15,7 @@ import email
 import imaplib
 import random
 import hashlib
+import hmac
 import requests
 from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
@@ -29,12 +29,219 @@ SUPABASE_URL     = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY     = os.getenv("SUPABASE_KEY", "")
 GMAIL_USER       = os.getenv("GMAIL_USER", "codenexobr@gmail.com")
 GMAIL_PASS       = os.getenv("GMAIL_PASS", "qmeffbqmakyljxhm")
+SHOPEE_APP_ID    = os.getenv("SHOPEE_APP_ID", "18309950529")
+SHOPEE_SECRET    = os.getenv("SHOPEE_SECRET", "R7UZKOUQQPY4WRXOPC2LZWLP6RBABLYP")
 
 REMETENTES_LOJAS = [
     "pichau","terabyte","kabum","magazineluiza","magalu",
     "casasbahia","americanas","submarino","shoptime",
     "extra","pontofrio","fastshop","amazon","shopee",
 ]
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SHOPEE API OFICIAL — GraphQL com autenticação HMAC
+# ══════════════════════════════════════════════════════════════════════════════
+
+def gerar_assinatura_shopee(app_id: str, secret: str, payload: str) -> dict:
+    """
+    Gera headers de autenticação para a API da Shopee Afiliados.
+    Usa HMAC-SHA256 conforme documentação oficial.
+    """
+    timestamp = str(int(datetime.now().timestamp()))
+    nonce     = str(random.randint(100000, 999999))
+
+    # String para assinar: appId + timestamp + nonce + payload
+    msg_to_sign = f"{app_id}{timestamp}{nonce}{payload}"
+
+    signature = hmac.new(
+        secret.encode("utf-8"),
+        msg_to_sign.encode("utf-8"),
+        digestmod="sha256"
+    ).hexdigest()
+
+    return {
+        "Content-Type":          "application/json",
+        "Authorization":         f"SHA256 Credential={app_id}, Timestamp={timestamp}, Nonce={nonce}, Signature={signature}",
+        "User-Agent":            "Mozilla/5.0",
+    }
+
+
+def scrape_shopee() -> list:
+    """
+    Busca ofertas via API GraphQL oficial da Shopee Afiliados.
+    Retorna lista de promoções com link de afiliado já embutido.
+    """
+    promos = []
+    try:
+        print("[SHOPEE] Buscando ofertas via API oficial...")
+
+        url = "https://open-api.affiliate.shopee.com.br/graphql"
+
+        # Query GraphQL conforme documentação
+        query = """
+        query {
+          shopeeOfferV2(
+            sortType: 2
+            page: 1
+            limit: 20
+          ) {
+            nodes {
+              offerName
+              imageUrl
+              offerLink
+              originalLink
+              commissionRate
+              offerType
+              periodStartTime
+              periodEndTime
+            }
+            pageInfo {
+              page
+              limit
+              hasNextPage
+            }
+          }
+        }
+        """
+
+        payload = query.strip()
+        headers = gerar_assinatura_shopee(SHOPEE_APP_ID, SHOPEE_SECRET, payload)
+
+        resp = requests.post(
+            url,
+            json={"query": query},
+            headers=headers,
+            timeout=15
+        )
+
+        print(f"  [SHOPEE] Status: {resp.status_code}")
+
+        if resp.status_code == 200:
+            data  = resp.json()
+            erros = data.get("errors")
+            if erros:
+                print(f"  [SHOPEE] Erros GraphQL: {erros}")
+
+            nodes = (data.get("data", {})
+                        .get("shopeeOfferV2", {})
+                        .get("nodes", []))
+
+            print(f"  [SHOPEE] {len(nodes)} ofertas recebidas")
+
+            for node in nodes:
+                nome     = node.get("offerName", "")
+                foto     = node.get("imageUrl", "") or ""
+                href     = node.get("offerLink", "") or ""   # link JÁ com afiliado
+                comissao = node.get("commissionRate", "")
+                if not nome or not href:
+                    continue
+
+                # Converte comissão para % legível
+                desc_txt = ""
+                try:
+                    pct      = round(float(comissao) * 100, 1)
+                    desc_txt = f"Comissão: {pct}%"
+                except:
+                    pass
+
+                promos.append({
+                    "fonte":    "Shopee",
+                    "titulo":   nome[:80],
+                    "preco":    None,
+                    "preco_de": None,
+                    "desconto": None,
+                    "cupom":    "",
+                    "url":      href,
+                    "foto":     foto if foto.startswith("http") else "",
+                    "loja":     "Shopee",
+                    "temp":     95,
+                    "extra":    desc_txt,
+                })
+
+        else:
+            print(f"  [SHOPEE] Resposta: {resp.text[:200]}")
+
+        print(f"[SHOPEE] ✓ {len(promos)} ofertas")
+    except Exception as e:
+        print(f"[SHOPEE] Erro: {e}")
+    return promos
+
+
+def scrape_shopee_produtos() -> list:
+    """Busca produtos específicos via GetProductOfferList."""
+    promos = []
+    try:
+        print("[SHOPEE PRODUTOS] Buscando produtos em promoção...")
+        url   = "https://open-api.affiliate.shopee.com.br/graphql"
+        query = """
+        query {
+          productOfferV2(
+            sortType: 2
+            page: 1
+            limit: 20
+          ) {
+            nodes {
+              productName
+              imageUrl
+              offerLink
+              originalLink
+              priceMin
+              priceMax
+              commissionRate
+              sales
+              ratingStar
+            }
+            pageInfo {
+              hasNextPage
+            }
+          }
+        }
+        """
+        payload = query.strip()
+        headers = gerar_assinatura_shopee(SHOPEE_APP_ID, SHOPEE_SECRET, payload)
+        resp    = requests.post(url, json={"query": query}, headers=headers, timeout=15)
+
+        print(f"  [SHOPEE PRODUTOS] Status: {resp.status_code}")
+
+        if resp.status_code == 200:
+            data  = resp.json()
+            nodes = (data.get("data", {})
+                        .get("productOfferV2", {})
+                        .get("nodes", []))
+
+            for node in nodes:
+                nome     = node.get("productName","")
+                foto     = node.get("imageUrl","") or ""
+                href     = node.get("offerLink","") or ""
+                preco    = node.get("priceMin")
+                comissao = node.get("commissionRate","")
+                if not nome or not href: continue
+
+                preco_val = None
+                try:
+                    preco_val = round(float(preco), 2) if preco else None
+                except: pass
+
+                promos.append({
+                    "fonte":    "Shopee",
+                    "titulo":   nome[:80],
+                    "preco":    preco_val,
+                    "preco_de": None,
+                    "desconto": None,
+                    "cupom":    "",
+                    "url":      href,
+                    "foto":     foto if foto.startswith("http") else "",
+                    "loja":     "Shopee",
+                    "temp":     90,
+                    "extra":    "",
+                })
+
+        print(f"[SHOPEE PRODUTOS] ✓ {len(promos)} produtos")
+    except Exception as e:
+        print(f"[SHOPEE PRODUTOS] Erro: {e}")
+    return promos
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  EMAIL
@@ -66,10 +273,8 @@ def extrair_promos_do_email(html_body: str, remetente: str) -> list:
         urls_vistos = set()
         for link in soup.find_all("a", href=True):
             href = link.get("href","")
-            if not href or len(href) < 20 or href in urls_vistos:
-                continue
-            if any(x in href.lower() for x in ["unsubscribe","descadastrar","mailto"]):
-                continue
+            if not href or len(href) < 20 or href in urls_vistos: continue
+            if any(x in href.lower() for x in ["unsubscribe","descadastrar","mailto"]): continue
             urls_vistos.add(href)
 
             img  = link.find("img")
@@ -77,8 +282,7 @@ def extrair_promos_do_email(html_body: str, remetente: str) -> list:
             if img:
                 foto = img.get("src", img.get("data-src","")) or ""
                 try:
-                    if int(str(img.get("width","200")).replace("px","")) < 80:
-                        foto = ""
+                    if int(str(img.get("width","200")).replace("px","")) < 80: foto = ""
                 except: pass
 
             parent      = link.parent or link
@@ -107,7 +311,7 @@ def extrair_promos_do_email(html_body: str, remetente: str) -> list:
                 "fonte": f"Email ({loja})", "titulo": titulo[:80],
                 "preco": preco_val, "cupom": cupom, "url": href,
                 "foto": foto if foto.startswith("http") else "",
-                "loja": loja, "temp": 100,
+                "loja": loja, "temp": 100, "extra": "",
             })
             if len(promos) >= 5: break
     except Exception as e:
@@ -132,11 +336,10 @@ def scrape_email() -> list:
                 _, msg_data = mail.fetch(eid, "(RFC822)")
                 msg         = email.message_from_bytes(msg_data[0][1])
                 remetente   = msg.get("From","")
-                if not any(l in remetente.lower() for l in REMETENTES_LOJAS):
-                    continue
-                assunto = decodificar_assunto(msg.get("Subject",""))
+                if not any(l in remetente.lower() for l in REMETENTES_LOJAS): continue
+                assunto     = decodificar_assunto(msg.get("Subject",""))
                 print(f"  [EMAIL] {assunto[:50]}")
-                html_body = ""
+                html_body   = ""
                 if msg.is_multipart():
                     for part in msg.walk():
                         if part.get_content_type() == "text/html":
@@ -147,7 +350,7 @@ def scrape_email() -> list:
                     charset   = msg.get_content_charset() or "utf-8"
                     html_body = msg.get_payload(decode=True).decode(charset, errors="ignore")
                 if html_body:
-                    pe = extrair_promos_do_email(html_body, remetente)
+                    pe     = extrair_promos_do_email(html_body, remetente)
                     promos += pe
                     print(f"  [EMAIL] {len(pe)} promos extraídas")
                 mail.store(eid, "+FLAGS", "\\Seen")
@@ -161,7 +364,56 @@ def scrape_email() -> list:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  MERCADO LIVRE — API oficial corrigida
+#  KABUM
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scrape_kabum() -> list:
+    promos = []
+    try:
+        print("[KABUM] Buscando ofertas...")
+        s = requests.Session()
+        s.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+            "Accept":     "application/json, text/plain, */*",
+            "Origin":     "https://www.kabum.com.br",
+            "Referer":    "https://www.kabum.com.br/",
+        })
+        cats = ["oferta-do-dia","computadores","hardware","perifericos",
+                "smartphones-tablets","games","monitores-e-tvs"]
+        for cat in cats:
+            url = (f"https://servicespub.prod.api.aws.grupokabum.com.br"
+                   f"/catalog/v2/products-by-category/{cat}"
+                   f"?page_number=1&page_size=12&is_off=true&sort=0")
+            try:
+                resp = s.get(url, timeout=10)
+                if resp.status_code != 200 or not resp.text.strip(): continue
+                for item in resp.json().get("data",[]):
+                    nome     = item.get("name","")
+                    preco    = float(item.get("vlr_final") or item.get("price") or 0)
+                    preco_de = item.get("vlr_normal")
+                    slug     = item.get("path","")
+                    foto     = item.get("img") or item.get("image") or item.get("thumbnail") or ""
+                    href     = f"https://www.kabum.com.br/produto/{slug}" if slug else ""
+                    desconto = None
+                    if preco_de and float(preco_de) > preco > 0:
+                        desconto = round((1 - preco/float(preco_de))*100)
+                    if not nome or not href: continue
+                    promos.append({
+                        "fonte":"KaBuM","titulo":nome[:80],"preco":round(preco,2),
+                        "preco_de":round(float(preco_de),2) if preco_de else None,
+                        "desconto":desconto,"cupom":"","url":href,"foto":foto,
+                        "loja":"KaBuM","temp":95,"extra":"",
+                    })
+                time.sleep(0.5)
+            except: continue
+        print(f"[KABUM] ✓ {len(promos)} ofertas")
+    except Exception as e:
+        print(f"[KABUM] Erro: {e}")
+    return promos
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  MERCADO LIVRE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def scrape_mercadolivre() -> list:
@@ -173,174 +425,41 @@ def scrape_mercadolivre() -> list:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
             "Accept": "application/json",
         })
-
-        # Busca promoções direto pela API de ofertas do ML
         urls = [
-            "https://api.mercadolibre.com/sites/MLB/search?q=oferta&sort=relevance&limit=20&tag=good_quality_thumbnail&promotions=deal",
-            "https://api.mercadolibre.com/sites/MLB/search?q=promoção&sort=relevance&limit=20&promotions=deal",
+            "https://api.mercadolibre.com/sites/MLB/search?q=oferta&sort=relevance&limit=20&promotions=deal",
             "https://api.mercadolibre.com/sites/MLB/search?category=MLB1051&sort=relevance&limit=10&promotions=deal",
             "https://api.mercadolibre.com/sites/MLB/search?category=MLB1648&sort=relevance&limit=10&promotions=deal",
             "https://api.mercadolibre.com/sites/MLB/search?category=MLB1000&sort=relevance&limit=10&promotions=deal",
             "https://api.mercadolibre.com/sites/MLB/search?category=MLB5726&sort=relevance&limit=10&promotions=deal",
         ]
-
         for url in urls:
             try:
                 resp = s.get(url, timeout=10)
-                if resp.status_code != 200:
-                    continue
-                for item in resp.json().get("results", []):
-                    preco    = float(item.get("price", 0) or 0)
+                if resp.status_code != 200: continue
+                for item in resp.json().get("results",[]):
+                    preco    = float(item.get("price",0) or 0)
                     preco_de = item.get("original_price")
                     titulo   = item.get("title","")
                     href     = item.get("permalink","")
                     foto     = item.get("thumbnail","").replace("I.jpg","O.jpg")
-                    if not titulo or not href or preco <= 0:
-                        continue
+                    if not titulo or not href or preco <= 0: continue
                     desconto = None
                     if preco_de and float(preco_de) > preco:
-                        desconto = round((1 - preco / float(preco_de)) * 100)
+                        desconto = round((1-preco/float(preco_de))*100)
                     if ML_TAG and href:
                         sep  = "&" if "?" in href else "?"
                         href = f"{href}{sep}deal_print_id={ML_TAG}"
                     promos.append({
-                        "fonte":    "Mercado Livre",
-                        "titulo":   titulo[:80],
-                        "preco":    round(preco, 2),
-                        "preco_de": round(float(preco_de), 2) if preco_de else None,
-                        "desconto": desconto,
-                        "cupom":    "",
-                        "url":      href,
-                        "foto":     foto,
-                        "loja":     "Mercado Livre",
-                        "temp":     92,
+                        "fonte":"Mercado Livre","titulo":titulo[:80],"preco":round(preco,2),
+                        "preco_de":round(float(preco_de),2) if preco_de else None,
+                        "desconto":desconto,"cupom":"","url":href,"foto":foto,
+                        "loja":"Mercado Livre","temp":92,"extra":"",
                     })
                 time.sleep(0.3)
-            except Exception as e:
-                print(f"  [ML] Erro: {e}")
-                continue
-
+            except: continue
         print(f"[MERCADO LIVRE] ✓ {len(promos)} ofertas")
     except Exception as e:
         print(f"[MERCADO LIVRE] Erro: {e}")
-    return promos
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  KABUM — headers corretos
-# ══════════════════════════════════════════════════════════════════════════════
-
-def scrape_kabum() -> list:
-    promos = []
-    try:
-        print("[KABUM] Buscando ofertas...")
-        s = requests.Session()
-        s.headers.update({
-            "User-Agent":  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-            "Accept":      "application/json, text/plain, */*",
-            "Origin":      "https://www.kabum.com.br",
-            "Referer":     "https://www.kabum.com.br/",
-        })
-
-        cats = ["oferta-do-dia","computadores","hardware","perifericos",
-                "smartphones-tablets","games","monitores-e-tvs"]
-
-        for cat in cats:
-            url = (f"https://servicespub.prod.api.aws.grupokabum.com.br"
-                   f"/catalog/v2/products-by-category/{cat}"
-                   f"?page_number=1&page_size=12&is_off=true&sort=0")
-            try:
-                resp = s.get(url, timeout=10)
-                if resp.status_code != 200 or not resp.text.strip():
-                    continue
-                data  = resp.json()
-                items = data.get("data", [])
-                for item in items:
-                    nome     = item.get("name","")
-                    preco    = float(item.get("vlr_final") or item.get("price") or 0)
-                    preco_de = item.get("vlr_normal")
-                    slug     = item.get("path","")
-                    foto     = (item.get("img") or item.get("image") or
-                                item.get("thumbnail") or "")
-                    href     = f"https://www.kabum.com.br/produto/{slug}" if slug else ""
-                    desconto = None
-                    if preco_de and float(preco_de) > preco > 0:
-                        desconto = round((1 - preco / float(preco_de)) * 100)
-                    if not nome or not href: continue
-                    promos.append({
-                        "fonte":    "KaBuM",
-                        "titulo":   nome[:80],
-                        "preco":    round(preco, 2),
-                        "preco_de": round(float(preco_de),2) if preco_de else None,
-                        "desconto": desconto,
-                        "cupom":    "",
-                        "url":      href,
-                        "foto":     foto,
-                        "loja":     "KaBuM",
-                        "temp":     95,
-                    })
-                time.sleep(0.5)
-            except Exception as e:
-                print(f"  [KABUM] {cat} erro: {e}")
-                continue
-
-        print(f"[KABUM] ✓ {len(promos)} ofertas")
-    except Exception as e:
-        print(f"[KABUM] Erro: {e}")
-    return promos
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-#  PROMOBIT — nova fonte que funciona no Railway
-# ══════════════════════════════════════════════════════════════════════════════
-
-def scrape_promobit() -> list:
-    promos = []
-    try:
-        print("[PROMOBIT] Buscando promoções...")
-        s = requests.Session()
-        s.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-            "Accept":     "application/json",
-            "Origin":     "https://www.promobit.com.br",
-            "Referer":    "https://www.promobit.com.br/",
-        })
-
-        url  = "https://api.promobit.com.br/offers?limit=20&page=1&sort=hot"
-        resp = s.get(url, timeout=10)
-        print(f"  [PROMOBIT] Status: {resp.status_code}")
-
-        if resp.status_code == 200:
-            data  = resp.json()
-            items = data.get("data", data.get("offers", data.get("results", [])))
-            for item in items[:20]:
-                titulo   = item.get("title", item.get("name",""))
-                preco    = float(item.get("price", item.get("offer_price", 0)) or 0)
-                preco_de = item.get("old_price", item.get("original_price"))
-                href     = item.get("url", item.get("link", item.get("offer_url","")))
-                foto     = item.get("image", item.get("photo", item.get("thumbnail","")))
-                cupom    = item.get("coupon", item.get("coupon_code","")) or ""
-                loja     = item.get("store", item.get("merchant", item.get("shop","")))
-                desconto = None
-                if preco_de and float(preco_de) > preco > 0:
-                    desconto = round((1 - preco / float(preco_de)) * 100)
-                if not titulo or not href: continue
-                promos.append({
-                    "fonte":    "Promobit",
-                    "titulo":   titulo[:80],
-                    "preco":    round(preco, 2),
-                    "preco_de": round(float(preco_de),2) if preco_de else None,
-                    "desconto": desconto,
-                    "cupom":    str(cupom) if cupom else "",
-                    "url":      href,
-                    "foto":     foto if foto and foto.startswith("http") else "",
-                    "loja":     str(loja) if loja else "Promobit",
-                    "temp":     item.get("temperature", item.get("hot_score", 80)),
-                })
-
-        print(f"[PROMOBIT] ✓ {len(promos)} promoções")
-    except Exception as e:
-        print(f"[PROMOBIT] Erro: {e}")
     return promos
 
 
@@ -349,10 +468,8 @@ def scrape_promobit() -> list:
 # ══════════════════════════════════════════════════════════════════════════════
 
 def adicionar_tag_amazon(url: str, tag: str) -> str:
-    if "tag=" in url:
-        return re.sub(r"tag=[^&]+", f"tag={tag}", url)
+    if "tag=" in url: return re.sub(r"tag=[^&]+", f"tag={tag}", url)
     return f"{url}&tag={tag}" if "?" in url else f"{url}?tag={tag}"
-
 
 def gerar_link_afiliado(promo: dict) -> str:
     url   = promo.get("url","")
@@ -362,7 +479,7 @@ def gerar_link_afiliado(promo: dict) -> str:
     if fonte == "Mercado Livre" and ML_TAG:
         sep = "&" if "?" in url else "?"
         return f"{url}{sep}deal_print_id={ML_TAG}"
-    return url
+    return url  # Shopee já vem com link de afiliado da API
 
 
 def formatar_mensagem(promo: dict) -> str:
@@ -372,10 +489,11 @@ def formatar_mensagem(promo: dict) -> str:
     desconto = promo.get("desconto")
     loja     = promo.get("loja", promo.get("fonte",""))
     cupom    = promo.get("cupom","")
+    extra    = promo.get("extra","")
     url      = gerar_link_afiliado(promo)
     fonte    = promo.get("fonte","")
 
-    emojis = {"Mercado Livre":"🛒","KaBuM":"💻","Promobit":"🔥","Pelando":"🔥","Shopee":"🧡","Amazon":"📦"}
+    emojis = {"Mercado Livre":"🛒","KaBuM":"💻","Shopee":"🧡","Amazon":"📦","Promobit":"🔥"}
     emoji  = emojis.get(fonte, "📧" if "Email" in fonte else "🏷️")
 
     msg  = f"{emoji} *{titulo}*\n\n"
@@ -387,6 +505,8 @@ def formatar_mensagem(promo: dict) -> str:
         msg += f"~~De {df}~~ → *{desconto}% OFF* 🔥\n"
     elif desconto:
         msg += f"*{desconto}% OFF* 🔥\n"
+    if extra:
+        msg += f"💸 {extra}\n"
     if loja:
         msg += f"🏪 Loja: {loja}\n"
     if cupom:
@@ -410,6 +530,7 @@ def enviar_telegram(promo: dict) -> bool:
             if resp.status_code == 200:
                 print("  [TELEGRAM] ✓ Com foto!")
                 return True
+            print(f"  [TELEGRAM] Foto falhou ({resp.status_code})")
         resp = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
             json={"chat_id":TELEGRAM_CHAT_ID,"text":mensagem,
@@ -441,7 +562,7 @@ def ja_enviada(h: str) -> bool:
             headers={"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}"},
             timeout=10)
         res = r.json()
-        return isinstance(res, list) and len(res) > 0
+        return isinstance(res,list) and len(res) > 0
     except: return False
 
 def marcar_enviada(promo: dict, h: str):
@@ -466,14 +587,16 @@ def marcar_enviada(promo: dict, h: str):
 
 def main():
     print("="*60)
-    print("  NEXOS PROMO BOT v8")
+    print("  NEXOS PROMO BOT v9")
     print(f"  {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
+    print(f"  Shopee AppID: {SHOPEE_APP_ID}")
     print(f"  Supabase: {'✓' if SUPABASE_URL else '✗'}")
     print("="*60)
 
     todas  = []
     todas += scrape_email()
-    todas += scrape_promobit()
+    todas += scrape_shopee()
+    todas += scrape_shopee_produtos()
     todas += scrape_kabum()
     todas += scrape_mercadolivre()
 
