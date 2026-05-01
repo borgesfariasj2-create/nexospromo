@@ -46,24 +46,19 @@ REMETENTES_LOJAS = [
 def gerar_assinatura_shopee(app_id: str, secret: str, payload: str) -> dict:
     """
     Gera headers de autenticação para a API da Shopee Afiliados.
-    Usa HMAC-SHA256 conforme documentação oficial.
+    Fórmula correta: SHA256(app_id + timestamp + payload + secret)
     """
+    import hashlib
     timestamp = str(int(datetime.now().timestamp()))
-    nonce     = str(random.randint(100000, 999999))
 
-    # String para assinar: appId + timestamp + nonce + payload
-    msg_to_sign = f"{app_id}{timestamp}{nonce}{payload}"
-
-    signature = hmac.new(
-        secret.encode("utf-8"),
-        msg_to_sign.encode("utf-8"),
-        digestmod="sha256"
-    ).hexdigest()
+    # Fórmula correta conforme documentação Shopee Affiliate GraphQL
+    factor    = app_id + timestamp + payload + secret
+    signature = hashlib.sha256(factor.encode("utf-8")).hexdigest()
 
     return {
-        "Content-Type":          "application/json",
-        "Authorization":         f"SHA256 Credential={app_id}, Timestamp={timestamp}, Nonce={nonce}, Signature={signature}",
-        "User-Agent":            "Mozilla/5.0",
+        "Content-Type":  "application/json",
+        "Authorization": f"SHA256 Credential={app_id},Timestamp={timestamp},Signature={signature}",
+        "User-Agent":    "Mozilla/5.0",
     }
 
 
