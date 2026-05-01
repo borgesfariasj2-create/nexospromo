@@ -1,10 +1,12 @@
 """
 ================================================================================
-  NEXOS PROMO BOT v6
-  - Lê emails de promoção automaticamente (Pichau, Terabyte, KaBuM, etc)
-  - Extrai título, preço e foto dos emails
-  - Envia no Telegram com foto
-  - Fontes: Email + Pelando + KaBuM API + ML API + Shopee
+  NEXOS PROMO BOT v7
+  - Headers que bypassam bloqueio 403
+  - Session com cookies para simular navegador real
+  - Mercado Livre API oficial (funciona no Railway)
+  - Pelando com headers corretos
+  - KaBuM com endpoint atualizado
+  - Email (Pichau, Terabyte, etc)
 ================================================================================
 """
 
@@ -27,33 +29,42 @@ AMAZON_TAG       = os.getenv("AMAZON_TAG", "20070b1-20")
 ML_TAG           = os.getenv("ML_TAG", "")
 SUPABASE_URL     = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY     = os.getenv("SUPABASE_KEY", "")
+GMAIL_USER       = os.getenv("GMAIL_USER", "codenexobr@gmail.com")
+GMAIL_PASS       = os.getenv("GMAIL_PASS", "qmeffbqmakyljxhm")
 
-# Email
-GMAIL_USER = os.getenv("GMAIL_USER", "codenexobr@gmail.com")
-GMAIL_PASS = os.getenv("GMAIL_PASS", "qmeffbqmakyljxhm")  # senha de app sem espaços
+# ── Headers realistas por site ─────────────────────────────────────────────────
+def get_session(referer: str = "") -> requests.Session:
+    """Cria sessão com headers que imitam Chrome real."""
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept":          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Connection":      "keep-alive",
+        "Upgrade-Insecure-Requests": "1",
+        "Sec-Fetch-Dest":  "document",
+        "Sec-Fetch-Mode":  "navigate",
+        "Sec-Fetch-Site":  "none",
+        "Sec-Fetch-User":  "?1",
+        "Cache-Control":   "max-age=0",
+    })
+    if referer:
+        s.headers.update({"Referer": referer})
+    return s
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    "Accept-Language": "pt-BR,pt;q=0.9",
-    "Accept": "application/json, text/html, */*",
-}
-
-# Remetentes de lojas que você assinou newsletter
 REMETENTES_LOJAS = [
     "pichau", "terabyte", "kabum", "magazineluiza", "magalu",
     "casasbahia", "americanas", "submarino", "shoptime",
-    "extra", "pontofrio", "fastshop", "amazon",
+    "extra", "pontofrio", "fastshop", "amazon", "shopee",
 ]
 
-
 # ══════════════════════════════════════════════════════════════════════════════
-#  LEITOR DE EMAIL — MÓDULO PRINCIPAL NOVO
+#  LEITOR DE EMAIL
 # ══════════════════════════════════════════════════════════════════════════════
 
 def decodificar_assunto(assunto_raw) -> str:
-    """Decodifica assunto do email."""
-    partes = decode_header(assunto_raw)
+    partes  = decode_header(assunto_raw)
     assunto = ""
     for parte, enc in partes:
         if isinstance(parte, bytes):
@@ -64,92 +75,67 @@ def decodificar_assunto(assunto_raw) -> str:
 
 
 def extrair_promos_do_email(html_body: str, remetente: str) -> list:
-    """
-    Extrai promoções do corpo HTML do email.
-    Retorna lista de promos no mesmo formato dos scrapers.
-    """
     promos = []
     try:
         soup = BeautifulSoup(html_body, "html.parser")
-
-        # Identifica a loja pelo remetente
         loja = "Newsletter"
         for nome in REMETENTES_LOJAS:
             if nome in remetente.lower():
                 loja = nome.title()
                 break
 
-        # Estratégia 1: Procura por blocos de produto (padrão comum em newsletters)
-        # Cada produto tem: imagem + nome + preço + link
         links = soup.find_all("a", href=True)
+        ignorar = ["unsubscribe","descadastrar","cancelar","privacidade",
+                   "clique aqui","ver mais","saiba mais","comprar","acesse",
+                   "confira","newsletter","logo","banner","header","footer"]
 
         for link in links:
             href = link.get("href", "")
-            if not href or "unsubscribe" in href.lower() or "descadastrar" in href.lower():
+            if not href or len(href) < 20:
                 continue
-            if len(href) < 20:
+            if any(x in href.lower() for x in ["unsubscribe","descadastrar","mailto"]):
                 continue
 
-            # Procura imagem dentro ou perto do link
-            img = link.find("img")
+            img  = link.find("img")
             foto = ""
             if img:
                 foto = img.get("src", img.get("data-src", "")) or ""
-                # Filtra imagens de logo/banner muito pequenas
-                width  = img.get("width", "200")
-                height = img.get("height", "200")
                 try:
-                    if int(str(width).replace("px","")) < 80:
+                    w = int(str(img.get("width","200")).replace("px",""))
+                    if w < 80:
                         foto = ""
                 except:
                     pass
 
-            # Procura texto de preço próximo ao link
-            texto_bloco = link.get_text(" ", strip=True)
-            parent      = link.parent
-            if parent:
-                texto_bloco = parent.get_text(" ", strip=True)
+            parent      = link.parent or link
+            texto_bloco = parent.get_text(" ", strip=True)
 
-            # Extrai preço do texto
-            precos = re.findall(r"R\$\s*[\d.,]+", texto_bloco)
+            precos    = re.findall(r"R\$\s*[\d.,]+", texto_bloco)
             preco_val = None
             if precos:
                 try:
-                    num = re.findall(r"[\d.,]+", precos[0])[0]
+                    num       = re.findall(r"[\d.,]+", precos[0])[0]
                     preco_val = float(num.replace(".", "").replace(",", "."))
                 except:
                     pass
 
-            # Extrai título — tenta alt da imagem ou texto do link
             titulo = ""
             if img:
                 titulo = img.get("alt", "").strip()
             if not titulo or len(titulo) < 5:
                 titulo = link.get_text(" ", strip=True)[:80]
-            if not titulo or len(titulo) < 5:
+            if not titulo or len(titulo) < 8:
+                continue
+            if any(x in titulo.lower() for x in ignorar):
                 continue
 
-            # Filtra títulos genéricos
-            titulo_lower = titulo.lower()
-            ignorar = ["clique", "aqui", "ver mais", "saiba mais", "comprar",
-                       "acesse", "confira", "oferta", "promoção", "desconto",
-                       "newsletter", "logo", "banner", "header", "footer"]
-            if any(x in titulo_lower for x in ignorar):
-                continue
-
-            # Só adiciona se tem título útil
-            if len(titulo) < 8:
-                continue
-
-            # Cupom — procura no texto do email
             cupom = ""
-            texto_cupom = soup.get_text()
-            match_cupom = re.search(
+            match = re.search(
                 r"(?:cupom|código|code|coupon)[:\s]+([A-Z0-9]{4,20})",
-                texto_cupom, re.IGNORECASE
+                soup.get_text(), re.IGNORECASE
             )
-            if match_cupom:
-                cupom = match_cupom.group(1).upper()
+            if match:
+                cupom = match.group(1).upper()
 
             promos.append({
                 "fonte":  f"Email ({loja})",
@@ -159,18 +145,16 @@ def extrair_promos_do_email(html_body: str, remetente: str) -> list:
                 "url":    href,
                 "foto":   foto if foto.startswith("http") else "",
                 "loja":   loja,
-                "temp":   100,  # Email tem prioridade alta
+                "temp":   100,
             })
 
-        # Remove duplicatas por URL dentro do mesmo email
         urls_vistos = set()
-        unicas = []
+        unicas      = []
         for p in promos:
             if p["url"] not in urls_vistos and p.get("titulo"):
                 urls_vistos.add(p["url"])
                 unicas.append(p)
-
-        return unicas[:5]  # Máximo 5 promos por email
+        return unicas[:5]
 
     except Exception as e:
         print(f"  [EMAIL PARSER] Erro: {e}")
@@ -178,7 +162,6 @@ def extrair_promos_do_email(html_body: str, remetente: str) -> list:
 
 
 def scrape_email() -> list:
-    """Conecta no Gmail via IMAP e lê emails de promoção não lidos."""
     promos = []
     try:
         print("[EMAIL] Conectando ao Gmail...")
@@ -186,29 +169,23 @@ def scrape_email() -> list:
         mail.login(GMAIL_USER, GMAIL_PASS)
         mail.select("inbox")
 
-        # Busca emails não lidos dos últimos 2 dias
         data_busca = (datetime.now() - timedelta(days=2)).strftime("%d-%b-%Y")
-        _, ids = mail.search(None, f'(UNSEEN SINCE "{data_busca}")')
+        _, ids     = mail.search(None, f'(UNSEEN SINCE "{data_busca}")')
+        email_ids  = ids[0].split()
+        print(f"[EMAIL] {len(email_ids)} emails não lidos")
 
-        email_ids = ids[0].split()
-        print(f"[EMAIL] {len(email_ids)} emails não lidos encontrados")
-
-        for eid in email_ids[-20:]:  # Últimos 20 emails
+        for eid in email_ids[-20:]:
             try:
                 _, msg_data = mail.fetch(eid, "(RFC822)")
                 msg         = email.message_from_bytes(msg_data[0][1])
                 remetente   = msg.get("From", "")
-                assunto_raw = msg.get("Subject", "")
-                assunto     = decodificar_assunto(assunto_raw)
+                assunto     = decodificar_assunto(msg.get("Subject", ""))
 
-                # Verifica se é de uma loja conhecida
-                eh_loja = any(loja in remetente.lower() for loja in REMETENTES_LOJAS)
-                if not eh_loja:
+                if not any(l in remetente.lower() for l in REMETENTES_LOJAS):
                     continue
 
-                print(f"  [EMAIL] Processando: {assunto[:50]} | De: {remetente[:40]}")
+                print(f"  [EMAIL] {assunto[:50]} | {remetente[:40]}")
 
-                # Extrai corpo HTML
                 html_body = ""
                 if msg.is_multipart():
                     for part in msg.walk():
@@ -223,59 +200,134 @@ def scrape_email() -> list:
                 if not html_body:
                     continue
 
-                # Extrai promoções do email
                 promos_email = extrair_promos_do_email(html_body, remetente)
                 print(f"  [EMAIL] {len(promos_email)} promos extraídas")
                 promos += promos_email
-
-                # Marca como lido
                 mail.store(eid, "+FLAGS", "\\Seen")
 
             except Exception as e:
-                print(f"  [EMAIL] Erro ao processar email: {e}")
+                print(f"  [EMAIL] Erro: {e}")
                 continue
 
         mail.logout()
-        print(f"[EMAIL] ✓ {len(promos)} promos extraídas dos emails")
+        print(f"[EMAIL] ✓ {len(promos)} promos dos emails")
 
-    except imaplib.IMAP4.error as e:
-        print(f"[EMAIL] Erro de autenticação: {e}")
     except Exception as e:
         print(f"[EMAIL] Erro: {e}")
-
     return promos
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SCRAPERS VIA API (funcionam no Railway)
+#  SCRAPER — MERCADO LIVRE (API oficial — funciona no Railway)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def scrape_mercadolivre() -> list:
+    promos = []
+    try:
+        print("[MERCADO LIVRE] Buscando ofertas...")
+        s    = get_session("https://www.mercadolivre.com.br")
+        cats = [
+            "MLB1051",  # Celulares
+            "MLB1648",  # Computadores
+            "MLB1000",  # Eletrônicos
+            "MLB5726",  # Eletrodomésticos
+            "MLB1246",  # TV e Vídeo
+            "MLB1168",  # Esportes
+            "MLB1459",  # Beleza
+            "MLB1144",  # Moda
+            "MLB1276",  # Ferramentas
+            "MLB1367",  # Casa e Jardim
+        ]
+        for cat_id in cats:
+            try:
+                url  = (f"https://api.mercadolibre.com/sites/MLB/search"
+                        f"?category={cat_id}&sort=price_asc&limit=10"
+                        f"&attributes=id,title,price,original_price,thumbnail,permalink")
+                resp = s.get(url, timeout=10)
+                if resp.status_code != 200:
+                    continue
+                for item in resp.json().get("results", []):
+                    preco    = float(item.get("price", 0) or 0)
+                    preco_de = item.get("original_price")
+                    if not preco_de or float(preco_de) <= preco:
+                        continue
+                    desconto = round((1 - preco / float(preco_de)) * 100)
+                    if desconto < 5:
+                        continue
+                    titulo = item.get("title", "")
+                    href   = item.get("permalink", "")
+                    foto   = item.get("thumbnail", "").replace("I.jpg", "O.jpg")
+                    if ML_TAG and href:
+                        sep  = "&" if "?" in href else "?"
+                        href = f"{href}{sep}deal_print_id={ML_TAG}"
+                    if not titulo or not href:
+                        continue
+                    promos.append({
+                        "fonte":    "Mercado Livre",
+                        "titulo":   titulo[:80],
+                        "preco":    round(preco, 2),
+                        "preco_de": round(float(preco_de), 2),
+                        "desconto": desconto,
+                        "cupom":    "",
+                        "url":      href,
+                        "foto":     foto,
+                        "loja":     "Mercado Livre",
+                        "temp":     92,
+                    })
+                time.sleep(0.3)
+            except Exception:
+                continue
+
+        print(f"[MERCADO LIVRE] ✓ {len(promos)} ofertas")
+    except Exception as e:
+        print(f"[MERCADO LIVRE] Erro: {e}")
+    return promos
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  SCRAPER — PELANDO (GraphQL com headers corretos)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def scrape_pelando() -> list:
     promos = []
     try:
         print("[PELANDO] Buscando promoções...")
-        resp = requests.post(
+        s = get_session("https://www.pelando.com.br/")
+        s.headers.update({
+            "content-type": "application/json",
+            "origin":       "https://www.pelando.com.br",
+            "x-requested-with": "XMLHttpRequest",
+        })
+
+        # Primeiro acessa a home para pegar cookies
+        try:
+            s.get("https://www.pelando.com.br/", timeout=8)
+            time.sleep(1)
+        except:
+            pass
+
+        query = {
+            "operationName": "HotDeals",
+            "query": """query HotDeals {
+              hotDeals(page: 1, pageSize: 20) {
+                edges { node {
+                  title price nextBestPrice url coupon
+                  temperature imageUrl
+                  merchant { name }
+                }}
+              }
+            }""",
+            "variables": {}
+        }
+        resp = s.post(
             "https://www.pelando.com.br/api/graphql",
-            json={
-                "operationName": "HotDeals",
-                "query": """query HotDeals {
-                  hotDeals(page: 1, pageSize: 20) {
-                    edges { node {
-                      title price nextBestPrice url coupon
-                      temperature imageUrl
-                      merchant { name }
-                    }}
-                  }
-                }""",
-                "variables": {}
-            },
-            headers={**HEADERS, "content-type": "application/json",
-                     "origin": "https://www.pelando.com.br",
-                     "referer": "https://www.pelando.com.br/"},
+            json=query,
             timeout=15
         )
+        print(f"  [PELANDO] Status: {resp.status_code}")
         if resp.status_code == 200:
-            for edge in resp.json().get("data", {}).get("hotDeals", {}).get("edges", []):
+            deals = resp.json().get("data", {}).get("hotDeals", {}).get("edges", [])
+            for edge in deals:
                 node     = edge.get("node", {})
                 preco    = node.get("price")
                 preco_de = node.get("nextBestPrice")
@@ -296,33 +348,47 @@ def scrape_pelando() -> list:
                     "foto":     node.get("imageUrl", "") or "",
                     "temp":     node.get("temperature", 0),
                 })
+
         print(f"[PELANDO] ✓ {len(promos)} promoções")
     except Exception as e:
         print(f"[PELANDO] Erro: {e}")
     return promos
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+#  SCRAPER — KABUM (endpoint atualizado)
+# ══════════════════════════════════════════════════════════════════════════════
+
 def scrape_kabum() -> list:
     promos = []
     try:
         print("[KABUM] Buscando ofertas...")
-        cats = ["oferta-do-dia","computadores","hardware","perifericos",
-                "smartphones-tablets","games","monitores-e-tvs","tv-e-video","eletrodomesticos"]
-        for cat in cats:
+        s = get_session("https://www.kabum.com.br/")
+
+        # Tenta diferentes endpoints
+        endpoints = [
+            "https://servicespub.prod.api.aws.grupokabum.com.br/catalog/v2/products-by-category/oferta-do-dia?page_number=1&page_size=12&is_off=true",
+            "https://servicespub.prod.api.aws.grupokabum.com.br/catalog/v1/products-by-category/oferta-do-dia?page_number=1&page_size=12&is_off=true",
+            "https://www.kabum.com.br/api/catalog/products?sort=discount&limit=20&page=1",
+        ]
+
+        for url in endpoints:
             try:
-                url  = (f"https://servicespub.prod.api.aws.grupokabum.com.br"
-                        f"/catalog/v2/products-by-category/{cat}"
-                        f"?page_number=1&page_size=12&is_off=true")
-                resp = requests.get(url, headers=HEADERS, timeout=10)
+                resp = s.get(url, timeout=10)
+                print(f"  [KABUM] {url[-40:]} → {resp.status_code}")
                 if resp.status_code != 200:
                     continue
-                for item in resp.json().get("data", []):
-                    nome     = item.get("name", "")
-                    preco    = float(item.get("vlr_final") or item.get("price") or 0)
-                    preco_de = item.get("vlr_normal")
-                    slug     = item.get("path", "")
+                data  = resp.json()
+                items = data.get("data", data.get("products", data.get("items", [])))
+                if not items:
+                    continue
+                for item in items[:15]:
+                    nome     = item.get("name", item.get("title", ""))
+                    preco    = float(item.get("vlr_final", item.get("price", item.get("sale_price", 0))) or 0)
+                    preco_de = item.get("vlr_normal", item.get("original_price"))
+                    slug     = item.get("path", item.get("slug", item.get("url_key", "")))
                     foto     = (item.get("img") or item.get("image") or
-                                item.get("thumbnail") or "")
+                                item.get("thumbnail") or item.get("photo") or "")
                     href     = f"https://www.kabum.com.br/produto/{slug}" if slug else ""
                     desconto = None
                     if preco_de and float(preco_de) > preco > 0:
@@ -341,72 +407,41 @@ def scrape_kabum() -> list:
                         "loja":     "KaBuM",
                         "temp":     95,
                     })
-                time.sleep(0.3)
-            except Exception:
+                if promos:
+                    break
+            except Exception as e:
+                print(f"  [KABUM] Endpoint falhou: {e}")
                 continue
+
         print(f"[KABUM] ✓ {len(promos)} ofertas")
     except Exception as e:
         print(f"[KABUM] Erro: {e}")
     return promos
 
 
-def scrape_mercadolivre() -> list:
-    promos = []
-    try:
-        print("[MERCADO LIVRE] Buscando ofertas com desconto...")
-        cats = ["MLB1051","MLB1648","MLB1000","MLB5726","MLB1246","MLB1168","MLB1459","MLB1574"]
-        for cat_id in cats[:6]:
-            try:
-                url  = (f"https://api.mercadolibre.com/sites/MLB/search"
-                        f"?category={cat_id}&sort=price_asc&limit=10"
-                        f"&attributes=id,title,price,original_price,thumbnail,permalink")
-                resp = requests.get(url, headers=HEADERS, timeout=10)
-                if resp.status_code != 200:
-                    continue
-                for item in resp.json().get("results", []):
-                    preco    = float(item.get("price", 0) or 0)
-                    preco_de = item.get("original_price")
-                    if not preco_de or float(preco_de) <= preco:
-                        continue
-                    desconto = round((1 - preco / float(preco_de)) * 100)
-                    titulo   = item.get("title", "")
-                    href     = item.get("permalink", "")
-                    foto     = item.get("thumbnail", "").replace("I.jpg", "O.jpg")
-                    if ML_TAG and href:
-                        sep  = "&" if "?" in href else "?"
-                        href = f"{href}{sep}deal_print_id={ML_TAG}"
-                    if not titulo or not href:
-                        continue
-                    promos.append({
-                        "fonte":    "Mercado Livre",
-                        "titulo":   titulo[:80],
-                        "preco":    round(preco, 2),
-                        "preco_de": round(float(preco_de), 2),
-                        "desconto": desconto,
-                        "cupom":    "",
-                        "url":      href,
-                        "foto":     foto,
-                        "loja":     "Mercado Livre",
-                        "temp":     92,
-                    })
-                time.sleep(0.5)
-            except Exception:
-                continue
-        print(f"[MERCADO LIVRE] ✓ {len(promos)} ofertas")
-    except Exception as e:
-        print(f"[MERCADO LIVRE] Erro: {e}")
-    return promos
-
+# ══════════════════════════════════════════════════════════════════════════════
+#  SCRAPER — SHOPEE flash sale
+# ══════════════════════════════════════════════════════════════════════════════
 
 def scrape_shopee() -> list:
     promos = []
     try:
         print("[SHOPEE] Buscando flash sales...")
-        resp = requests.get(
+        s = get_session("https://shopee.com.br/")
+        s.headers.update({"referer": "https://shopee.com.br/"})
+
+        # Visita home primeiro para pegar cookies
+        try:
+            s.get("https://shopee.com.br/", timeout=8)
+            time.sleep(1)
+        except:
+            pass
+
+        resp = s.get(
             "https://shopee.com.br/api/v4/flash_sale/get_all_sessions?need_main_image=true",
-            headers={**HEADERS, "referer": "https://shopee.com.br/"},
             timeout=15
         )
+        print(f"  [SHOPEE] Status: {resp.status_code}")
         if resp.status_code == 200:
             for session in resp.json().get("data", {}).get("sessions", [])[:2]:
                 for item in session.get("items", [])[:10]:
@@ -435,6 +470,7 @@ def scrape_shopee() -> list:
                         "loja":     "Shopee",
                         "temp":     88,
                     })
+
         print(f"[SHOPEE] ✓ {len(promos)} flash sales")
     except Exception as e:
         print(f"[SHOPEE] Erro: {e}")
@@ -473,12 +509,12 @@ def formatar_mensagem(promo: dict) -> str:
     fonte    = promo.get("fonte", "")
 
     emojis = {
-        "Pelando": "🔥", "KaBuM": "💻", "Pichau": "🖥️",
-        "Mercado Livre": "🛒", "Shopee": "🧡", "Amazon": "📦",
+        "Pelando": "🔥", "KaBuM": "💻", "Mercado Livre": "🛒",
+        "Shopee": "🧡", "Amazon": "📦",
     }
     emoji = emojis.get(fonte, "📧" if "Email" in fonte else "🏷️")
 
-    msg = f"{emoji} *{titulo}*\n\n"
+    msg  = f"{emoji} *{titulo}*\n\n"
     if preco:
         pf   = f"R$ {preco:,.2f}".replace(",","X").replace(".",",").replace("X",".")
         msg += f"💰 *Por apenas {pf}*\n"
@@ -512,7 +548,7 @@ def enviar_telegram(promo: dict) -> bool:
             if resp.status_code == 200:
                 print("  [TELEGRAM] ✓ Enviado com foto!")
                 return True
-            print("  [TELEGRAM] Foto falhou, enviando texto...")
+            print(f"  [TELEGRAM] Foto falhou ({resp.status_code}), tentando texto...")
 
         resp = requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
@@ -531,7 +567,7 @@ def enviar_telegram(promo: dict) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  SUPABASE — DUPLICATAS
+#  SUPABASE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def gerar_hash(promo: dict) -> str:
@@ -547,12 +583,11 @@ def ja_enviada(hash_promo: str) -> bool:
         resp = requests.get(
             f"{SUPABASE_URL}/rest/v1/promos_enviadas",
             params={"hash": f"eq.{hash_promo}", "data": f"eq.{hoje}", "select": "id"},
-            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}",
-                     "Accept": "application/json"},
+            headers={"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"},
             timeout=10
         )
-        resultado = resp.json()
-        return isinstance(resultado, list) and len(resultado) > 0
+        r = resp.json()
+        return isinstance(r, list) and len(r) > 0
     except:
         return False
 
@@ -571,9 +606,9 @@ def marcar_enviada(promo: dict, hash_promo: str):
             timeout=10
         )
         if resp.status_code in (200, 201):
-            print("  [DB] ✓ Salvo no Supabase")
+            print("  [DB] ✓ Salvo")
         else:
-            print(f"  [DB] Erro {resp.status_code}: {resp.text[:100]}")
+            print(f"  [DB] Erro {resp.status_code}: {resp.text[:80]}")
     except Exception as e:
         print(f"  [DB] Erro: {e}")
 
@@ -584,25 +619,22 @@ def marcar_enviada(promo: dict, hash_promo: str):
 
 def main():
     print("=" * 60)
-    print("  NEXOS PROMO BOT v6 — Email + APIs")
+    print("  NEXOS PROMO BOT v7")
     print(f"  {datetime.now().strftime('%d/%m/%Y %H:%M:%S')}")
-    print(f"  Gmail: {GMAIL_USER}")
-    print(f"  Supabase: {'✓' if SUPABASE_URL else '✗ não configurado'}")
+    print(f"  Gmail:    {GMAIL_USER}")
+    print(f"  Supabase: {'✓' if SUPABASE_URL else '✗'}")
     print("=" * 60)
 
-    todas = []
-
-    # Emails têm prioridade — vêm primeiro
+    todas  = []
     todas += scrape_email()
     todas += scrape_pelando()
     todas += scrape_kabum()
     todas += scrape_mercadolivre()
     todas += scrape_shopee()
 
-    # Filtra inválidos
     todas = [p for p in todas if p.get("titulo") and p.get("url")]
 
-    # Remove duplicatas locais por título
+    # Dedup local
     vistos = set()
     unicas = []
     for p in todas:
@@ -611,7 +643,7 @@ def main():
             vistos.add(chave)
             unicas.append(p)
 
-    # Ordena: email primeiro, depois por temperatura
+    # Email primeiro, depois por temperatura
     unicas.sort(key=lambda x: (0 if "Email" in x.get("fonte","") else 1,
                                 -x.get("temp", 0)))
 
@@ -636,16 +668,14 @@ def main():
             marcar_enviada(promo, hash_p)
             enviadas += 1
 
-        intervalo = random.randint(30, 60)
-        print(f"  ⏳ Aguardando {intervalo}s...")
-        time.sleep(intervalo)
+        time.sleep(random.randint(30, 60))
 
         if enviadas >= 15:
-            print("\n✅ Limite de 15 por rodada atingido.")
+            print("\n✅ Limite de 15 por rodada.")
             break
 
     print(f"\n{'='*60}")
-    print(f"  ✅ Concluído! {enviadas} promoções enviadas.")
+    print(f"  ✅ Concluído! {enviadas} enviadas.")
     print(f"{'='*60}")
 
 
